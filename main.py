@@ -1,146 +1,164 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
+import requests
 import json
-import os
+import webbrowser
 
-DATA_FILE = 'books.json'
+# --- Настройки ---
+FAVORITES_FILE = 'favorites.json'
+GITHUB_API_URL = 'https://api.github.com/search/users'
 
-# Загрузка данных из JSON
-def load_books():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, 'r', encoding='utf-8') as f:
+# --- Функции работы с избранным ---
+def load_favorites():
+    """Загружает список избранных пользователей из JSON."""
+    try:
+        with open(FAVORITES_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
-    return []
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
 
-# Сохранение данных в JSON
-def save_books(books):
-    with open(DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(books, f, ensure_ascii=False, indent=2)
+def save_favorites(favorites):
+    """Сохраняет список избранных пользователей в JSON."""
+    with open(FAVORITES_FILE, 'w', encoding='utf-8') as f:
+        json.dump(favorites, f, ensure_ascii=False, indent=2)
 
-# Добавление книги
-def add_book():
-    title = title_entry.get().strip()
-    author = author_entry.get().strip()
-    genre = genre_entry.get().strip()
-    pages = pages_entry.get().strip()
-
-    if not title or not author or not genre or not pages:
-        messagebox.showerror('Ошибка', 'Все поля должны быть заполнены')
+# --- Функции поиска и интерфейса ---
+def search_users():
+    """Ищет пользователей по введенному запросу."""
+    query = search_entry.get().strip()
+    if not query:
+        messagebox.showerror('Ошибка', 'Поле поиска не должно быть пустым')
         return
 
     try:
-        pages = int(pages)
-        if pages <= 0:
-            raise ValueError
-    except ValueError:
-        messagebox.showerror('Ошибка', 'Количество страниц должно быть положительным числом')
+        response = requests.get(GITHUB_API_URL, params={'q': query})
+        response.raise_for_status() # Проверка на ошибки HTTP
+        data = response.json()
+        
+        users = data.get('items', [])
+        update_search_results(users)
+    except requests.exceptions.RequestException as e:
+        messagebox.showerror('Ошибка сети', f'Не удалось подключиться к GitHub API: {e}')
+    except Exception as e:
+        messagebox.showerror('Ошибка', f'Произошла непредвиденная ошибка: {e}')
+
+def update_search_results(users):
+    """Обновляет список результатов поиска в интерфейсе."""
+    # Очищаем текущие результаты
+    for i in results_tree.get_children():
+        results_tree.delete(i)
+    
+    # Добавляем новых пользователей
+    for user in users:
+        login = user.get('login', '')
+        avatar_url = user.get('avatar_url', '')
+        html_url = user.get('html_url', '')
+        
+        # Проверяем, есть ли пользователь в избранном (для отображения кнопки)
+        is_favorite = login in [fav['login'] for fav in favorites]
+        
+        results_tree.insert('', 'end', 
+                           values=(login, avatar_url, html_url), 
+                           tags=('favorite' if is_favorite else 'not_favorite'))
+
+def on_user_click(event):
+    """Обработчик клика по пользователю в списке."""
+    item = results_tree.identify('item', event.x, event.y)
+    if not item:
+        return
+    
+    values = results_tree.item(item, 'values')
+    if not values:
+        return
+    
+    login, avatar_url, html_url = values
+    
+    # Открываем профиль в браузере
+    if html_url:
+        webbrowser.open(html_url)
+
+def toggle_favorite(event):
+    """Добавляет или удаляет пользователя из избранного."""
+    item = results_tree.identify('item', event.x, event.y)
+    if not item:
         return
 
-    book = {'title': title, 'author': author, 'genre': genre, 'pages': pages}
-    books.append(book)
-    save_books(books)
-    update_table(books)
-    clear_entries()
-
-# Очистка полей ввода
-def clear_entries():
-    title_entry.delete(0, tk.END)
-    author_entry.delete(0, tk.END)
-    genre_entry.delete(0, tk.END)
-    pages_entry.delete(0, tk.END)
-
-# Фильтрация по жанру и страницам
-def filter_books():
-    genre = filter_genre.get().strip()
-    try:
-        min_pages = int(filter_pages.get().strip()) if filter_pages.get().strip() else 0
-    except ValueError:
-        messagebox.showerror('Ошибка', 'В поле страниц должно быть число')
+    values = results_tree.item(item, 'values')
+    if not values:
         return
 
-    filtered = []
-    for book in all_books:
-        if genre and book['genre'].lower() != genre.lower():
-            continue
-        if min_pages and book['pages'] < min_pages:
-            continue
-        filtered.append(book)
-    update_table(filtered)
+    login = values[0]
+    
+    # Ищем пользователя в глобальном списке избранного
+    found_index = -1
+    for i, fav in enumerate(favorites):
+        if fav.get('login') == login:
+            found_index = i
+            break
 
-# Обновление таблицы
-def update_table(books_list):
-    for i in tree.get_children():
-        tree.delete(i)
-    for book in books_list:
-        tree.insert('', 'end', values=(book['title'], book['author'], book['genre'], book['pages']))
+    if found_index != -1:
+        # Удаляем из избранного
+        del favorites[found_index]
+        messagebox.showinfo('Успех', f'Пользователь {login} удален из избранного.')
+    else:
+        # Добавляем в избранное (нужно получить полные данные)
+        try:
+            user_data = requests.get(f'https://api.github.com/users/{login}').json()
+            favorites.append(user_data)
+            messagebox.showinfo('Успех', f'Пользователь {login} добавлен в избранное.')
+        except Exception as e:
+            messagebox.showerror('Ошибка', f'Не удалось добавить в избранное: {e}')
+            return
 
-# Инициализация данных
-all_books = load_books()
+    save_favorites(favorites)
+    update_search_results(get_current_search_results()) # Обновляем вид кнопок
 
-# Создание окна
+def get_current_search_results():
+    """Возвращает текущие данные в таблице результатов (для обновления статуса избранного)."""
+    items = []
+    for child in results_tree.get_children():
+        values = results_tree.item(child, 'values')
+        if values:
+            login, avatar_url, html_url = values
+            items.append({'login': login, 'avatar_url': avatar_url, 'html_url': html_url})
+    return items
+
+# --- Инициализация приложения ---
 root = tk.Tk()
-root.title('Book Tracker')
-root.geometry('700x500')
+root.title('GitHub User Finder')
+root.geometry('800x600')
 
-# Вкладки (Notebook)
-notebook = ttk.Notebook(root)
-notebook.pack(padx=10, pady=5, fill='both', expand=True)
+# Загружаем избранное при старте
+favorites = load_favorites()
 
-# Вкладка "Добавить книгу"
-add_frame = ttk.Frame(notebook)
-notebook.add(add_frame, text='Добавить книгу')
+# Поле поиска и кнопка
+top_frame = ttk.Frame(root)
+top_frame.pack(pady=10, fill='x')
 
-# Поля ввода
-tk.Label(add_frame, text='Название:').grid(row=0, column=0, padx=5, pady=5, sticky='e')
-tk.Label(add_frame, text='Автор:').grid(row=1, column=0, padx=5, pady=5, sticky='e')
-tk.Label(add_frame, text='Жанр:').grid(row=2, column=0, padx=5, pady=5, sticky='e')
-tk.Label(add_frame, text='Страниц:').grid(row=3, column=0, padx=5, pady=5, sticky='e')
+search_entry = ttk.Entry(top_frame, width=50)
+search_entry.pack(side='left', padx=5, expand=True, fill='x')
 
-title_entry = tk.Entry(add_frame, width=40)
-author_entry = tk.Entry(add_frame, width=40)
-genre_entry = tk.Entry(add_frame, width=40)
-pages_entry = tk.Entry(add_frame, width=40)
+search_btn = ttk.Button(top_frame, text='Поиск', command=search_users)
+search_btn.pack(side='left', padx=5)
 
-title_entry.grid(row=0, column=1, padx=5, pady=5)
-author_entry.grid(row=1, column=1, padx=5, pady=5)
-genre_entry.grid(row=2, column=1, padx=5, pady=5)
-pages_entry.grid(row=3, column=1, padx=5, pady=5)
+# Таблица результатов поиска
+results_tree = ttk.Treeview(root, columns=('Login', 'Avatar URL', 'Profile URL'), show='headings')
+results_tree.heading('Login', text='Логин')
+results_tree.column('Login', width=150)
+results_tree.heading('Avatar URL', text='Аватар')
+results_tree.column('Avatar URL', width=200)
+results_tree.heading('Profile URL', text='Ссылка')
+results_tree.column('Profile URL', width=200)
+results_tree.pack(padx=10, pady=10, fill='both', expand=True)
 
-add_btn = tk.Button(add_frame, text='Добавить книгу', command=add_book)
-add_btn.grid(row=4, column=0, columnspan=2, pady=15)
+# Настройка стилей для избранного (значок звезды)
+style = ttk.Style()
+style.configure('favorite.Treeview', background='#FFFACD') # Светло-желтый для избранных
 
-# Вкладка "Фильтр"
-filter_frame = ttk.Frame(notebook)
-notebook.add(filter_frame, text='Фильтр')
+# Привязка событий (клик и двойной клик)
+results_tree.tag_configure('favorite', background='#FFFACD')
+results_tree.tag_configure('not_favorite', background='white')
+results_tree.bind('<Double-1>', on_user_click)  # Двойной клик открывает профиль
+results_tree.bind('<Button-3>', toggle_favorite) # Правый клик добавляет/убирает из избранного
 
-tk.Label(filter_frame, text='Жанр:').grid(row=0, column=0, padx=5, pady=5)
-tk.Label(filter_frame, text='Страниц >:').grid(row=1, column=0, padx=5, pady=5)
-
-filter_genre = tk.Entry(filter_frame)
-filter_pages = tk.Entry(filter_frame)
-
-filter_genre.grid(row=0, column=1, padx=5, pady=5)
-filter_pages.grid(row=1, column=1, padx=5, pady=5)
-
-filter_btn = tk.Button(filter_frame, text='Применить фильтр', command=filter_books)
-filter_btn.grid(row=2, column=0, columnspan=2, pady=10)
-
-# Вкладка "Список книг"
-list_frame = ttk.Frame(notebook)
-notebook.add(list_frame, text='Список книг')
-
-tree = ttk.Treeview(list_frame,
-                    columns=('title', 'author', 'genre', 'pages'),
-                    show='headings')
-tree.heading('title', text='Название')
-tree.heading('author', text='Автор')
-tree.heading('genre', text='Жанр')
-tree.heading('pages', text='Страниц')
-tree.column('title', width=200)
-tree.column('author', width=150)
-tree.column('genre', width=120)
-tree.column('pages', width=80)
-tree.pack(padx=10, pady=10, fill='both', expand=True)
-
-update_table(all_books)
 root.mainloop()
